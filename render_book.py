@@ -42,8 +42,10 @@ def find_files(args):
             files += p.glob("*.mbp-10.dbn.zst")
         elif any(ch in arg for ch in "*?"):
             files += map(Path, glob.glob(arg))
-        else:
+        elif p.is_file():
             files.append(p)
+        else:
+            sys.exit(f"not found: {arg}")
     return sorted(files)
 
 
