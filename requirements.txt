@@ -1,0 +1,6 @@
+databento
+imageio-ffmpeg
+matplotlib
+numpy
+pandas
+pyarrow
