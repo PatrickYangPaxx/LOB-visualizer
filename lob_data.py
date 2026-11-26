@@ -18,7 +18,7 @@ def chunks(path, size=2_000_000):
 
     store = db.DBNStore.from_file(path)
     for df in store.to_df(price_type="float", pretty_ts=True, map_symbols=False, tz=TZ, count=size):
-        yield df[["action", "side", "price", "size", "flags"] + BOOK]
+        yield df[["action", "side", "price", "size", "flags", "sequence"] + BOOK]
 
 
 def valid(df):
@@ -65,7 +65,9 @@ def load_ticks(path, start, end):
     sell = df["size"].where(trade & (df["side"] == "A"), 0)
     change = df["action"].isin(["A", "C", "M"])
 
-    ticks = df.loc[~pd.Series(event).duplicated(keep="last").to_numpy(), BOOK].copy()
+    last = ~pd.Series(event).duplicated(keep="last").to_numpy()
+    ticks = df.loc[last, BOOK].copy()
+    ticks["sequence"] = df["sequence"].to_numpy()[last]  # the venue's message number, for reference
     ticks["buy_vol"] = buy.groupby(event).sum().to_numpy()
     ticks["sell_vol"] = sell.groupby(event).sum().to_numpy()
     ticks["trade_px"] = df["price"].where(trade).groupby(event).last().to_numpy()

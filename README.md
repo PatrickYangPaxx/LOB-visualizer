@@ -28,10 +28,13 @@ Start that (or a shortcut to it); it asks for your data folder and remembers it.
 python viewer.py "D:\your\folder"
 ```
 - top chart: drag the yellow band's edges to choose a range, double-click to move it, scroll to zoom, then **Load range**
+- or type the range in **From / To**: a time (`10:47:35`, `10:47:35.827614123`) or an update ID (`#1234567`); both ends are included
+- every book update has an ID: its number counted from the first update in the file, so an ID always finds the same update.
+  `[` / `]` set From / To to the update on screen, so you can narrow down to an exact sequence and reload it
 - space = play/pause, left/right = one update, shift + arrow = 100 updates, t / shift+t = next / previous trade, home/end
 - speed is either updates per second, or a multiple of real market time (1 = real speed)
 - click the range chart or drag the slider to jump
-- **Export MP4** renders the loaded range to a video with `render_book.py`
+- **Export MP4** renders exactly the loaded updates to a video
 
 Videos longer than 30 minutes are refused (it tells you what range or `--fps` would fit); `--force` overrides.
 Decoded data is cached in `lob_out/`, so re-rendering skips decoding.

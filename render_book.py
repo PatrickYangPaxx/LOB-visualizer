@@ -86,7 +86,9 @@ def seconds_for(path, cache_dir):
 def ticks_for(path, start, end, cache_dir):
     cache = cache_dir / f"{path.name.split('.')[0]}_{start:%H%M%S%f}-{end:%H%M%S%f}.ticks.parquet"
     if cache.exists():
-        return pd.read_parquet(cache)
+        ticks = pd.read_parquet(cache)
+        if "sequence" in ticks or ticks.empty:  # caches from before update IDs lack it
+            return ticks
     print(f"decoding {path.name} {start:%H:%M:%S.%f} - {end:%H:%M:%S.%f} ...")
     ticks = load_ticks(path, start, end)
     ticks.to_parquet(cache)
@@ -211,8 +213,10 @@ def overview(path, args, out_dir):
 
 def tick_by_tick(path, args, out_dir):
     day = day_of(path)
-    start, end = at(day, args.start), at(day, args.end)
-    ticks = ticks_for(path, start, end, out_dir)
+    if args.ticks_file:
+        ticks = pd.read_parquet(args.ticks_file)  # the exact updates the viewer had loaded
+    else:
+        ticks = ticks_for(path, at(day, args.start), at(day, args.end), out_dir)
     if ticks.empty:
         sys.exit(f"{path.name}: no book updates between {args.start} and {args.end}")
     n = len(ticks)
@@ -220,10 +224,15 @@ def tick_by_tick(path, args, out_dir):
         last_ok = ticks.index[MAX_MINUTES * 60 * args.fps - 1]
         sys.exit(f"  at {args.fps} fps, --end {last_ok:%H:%M:%S.%f} is the furthest that fits")
 
-    info = [f"{s}\nupdate {i + 1:>7,}/{n:,}\nbuy  {int(b):>6,} sh\nsell {int(a):>6,} sh"
-            for i, (s, b, a) in enumerate(zip(spread_line(ticks), ticks["buy_vol"], ticks["sell_vol"]))]
+    ids = ticks["update_id"].to_numpy() if "update_id" in ticks else None
+    labels = [f"#{u:,}" for u in ids] if ids is not None else [f"{i + 1:>7,}/{n:,}" for i in range(n)]
+    info = [f"{s}\nupdate {u}\nbuy  {int(b):>6,} sh\nsell {int(a):>6,} sh"
+            for s, u, b, a in zip(spread_line(ticks), labels, ticks["buy_vol"], ticks["sell_vol"])]
     clock = [t.strftime("%Y-%m-%d  %H:%M:%S.%f  New York") for t in ticks.index]
-    span = f"{args.start.replace(':', '')}-{args.end.replace(':', '')}"
+    if ids is not None:
+        span = f"{ids[0]}-{ids[-1]}"
+    else:
+        span = f"{args.start.replace(':', '')}-{args.end.replace(':', '')}"
     mp4 = out_dir / f"intc_ticks_{day}_{span}.mp4"
     render(ticks, np.arange(1, n + 1), info, clock, mp4, args.fps, "INTC limit order book, tick by tick",
            change_px=ticks["change_px"].to_numpy(float), change_side=ticks["change_side"].to_numpy(),
@@ -241,6 +250,7 @@ def main():
     ap.add_argument("--step", type=int, default=5, help="overview: seconds of market time per frame")
     ap.add_argument("--tick", action="store_true", help="one frame per book update instead of per --step")
     ap.add_argument("--date", help="YYYYMMDD, picks one file out of several for --tick")
+    ap.add_argument("--ticks-file", help=argparse.SUPPRESS)  # used by the viewer's Export MP4
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--force", action="store_true", help=f"render even if longer than {MAX_MINUTES} min")
     ap.add_argument("--out", default="lob_out", help="folder for the mp4s and cache")

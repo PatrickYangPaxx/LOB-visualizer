@@ -2,9 +2,14 @@
 
     python viewer.py "D:/data/folder"
 
-Top chart: the day's mid price. Drag the yellow band's edges to choose a range (double-click moves it),
-then Load. Playback: space = play/pause, left/right = step one update, shift+left/right = 100 updates,
-t / shift+t = next / previous trade, home/end = jump to the start/end of the range.
+Pick a range by dragging the yellow band on the day chart (double-click moves it), or type it in the
+From / To boxes as a time (10:47:35, 10:47:35.827614123) or an update ID (#1234567), then Load.
+Every book update has an ID: its number counted from the first update in the file, so the same ID
+always finds the same update. Both ends of a range are included.
+
+Playback: space = play/pause, left/right = step one update, shift+left/right = 100 updates,
+t / shift+t = next / previous trade, home/end = start/end of the range,
+[ / ] = set From / To to the current update.
 """
 import argparse
 import os
@@ -28,10 +33,29 @@ APP_DIR = Path(sys.executable if FROZEN else __file__).resolve().parent
 
 SELECT_COLOR = (242, 166, 0, 70)
 MAX_LOAD = 1_000_000  # updates; beyond this the decoded range gets too big to hold comfortably
+NS = 1_000_000_000
 
 
 def clock(sec):
     return f"{int(sec // 3600):02d}:{int(sec % 3600 // 60):02d}:{int(sec % 60):02d}"
+
+
+def parse_point(text):
+    """'#1234567' -> ("id", 1234567, False); '10:47:35.8276' -> ("ns", ns since midnight, whole_second)."""
+    t = text.strip().replace(",", "").replace(" ", "")
+    bad = ValueError(f"'{text}' is not a time like 10:47:35.123 or an ID like #1234567")
+    if t.startswith("#"):
+        if not t[1:].isdigit():
+            raise bad
+        return "id", int(t[1:]), False
+    hms, _, frac = t.partition(".")
+    parts = hms.split(":")
+    if len(parts) == 2:
+        parts.append("0")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts) or len(frac) > 9 or (frac and not frac.isdigit()):
+        raise bad
+    h, m, s = map(int, parts)
+    return "ns", ((h * 60 + m) * 60 + s) * NS + int(frac.ljust(9, "0")), not frac
 
 
 class ClockAxis(pg.AxisItem):
@@ -66,7 +90,8 @@ class Viewer(QtWidgets.QMainWindow):
         for keys, fn in [("Space", self.toggle_play), ("Right", lambda: self.step(1)), ("Left", lambda: self.step(-1)),
                          ("Shift+Right", lambda: self.step(100)), ("Shift+Left", lambda: self.step(-100)),
                          ("T", lambda: self.jump_trade(1)), ("Shift+T", lambda: self.jump_trade(-1)),
-                         ("Home", lambda: self.seek(0)), ("End", lambda: self.seek(len(self.ticks) - 1))]:
+                         ("Home", lambda: self.seek(0)), ("End", lambda: self.seek(len(self.ticks) - 1)),
+                         ("[", lambda: self.mark(self.from_box)), ("]", lambda: self.mark(self.to_box))]:
             QtGui.QShortcut(QtGui.QKeySequence(keys), self, fn)
         self.load_day(0)
 
@@ -80,13 +105,22 @@ class Viewer(QtWidgets.QMainWindow):
         self.day_box = QtWidgets.QComboBox()
         self.day_box.addItems([f.name for f in self.files])
         self.day_box.activated.connect(self.load_day)
+        self.from_box = QtWidgets.QLineEdit()
+        self.to_box = QtWidgets.QLineEdit()
+        for box, tip in [(self.from_box, "first update"), (self.to_box, "last update")]:
+            box.setPlaceholderText("HH:MM:SS.fff or #ID")
+            box.setToolTip(f"{tip}: a time like 10:47:35 or 10:47:35.827614123, or an update ID like #1234567")
+            box.setFixedWidth(190)
+            box.textEdited.connect(self.update_estimate)
+            box.returnPressed.connect(self.load_range)
         self.estimate = QtWidgets.QLabel()
         self.load_btn = QtWidgets.QPushButton("Load range")
         self.load_btn.clicked.connect(self.load_range)
         self.export_btn = QtWidgets.QPushButton("Export MP4")
         self.export_btn.clicked.connect(self.export)
         self.status = QtWidgets.QLabel()
-        for w in (self.day_box, self.estimate, self.load_btn, self.export_btn):
+        for w in (self.day_box, QtWidgets.QLabel("From"), self.from_box, QtWidgets.QLabel("To"), self.to_box,
+                  self.load_btn, self.estimate, self.export_btn):
             top.addWidget(w)
         top.addStretch()
         top.addWidget(self.status)
@@ -101,7 +135,7 @@ class Viewer(QtWidgets.QMainWindow):
                                "scroll to zoom", color=MUTED, size="9pt")
         self.day_line = self.day_plot.plot(pen=pg.mkPen(TEXT, width=1))
         self.region = pg.LinearRegionItem(brush=SELECT_COLOR, pen=pg.mkPen((242, 166, 0), width=2))
-        self.region.sigRegionChanged.connect(self.update_estimate)
+        self.region.sigRegionChanged.connect(self.on_region)
         self.day_plot.addItem(self.region)
         self.day_cursor = pg.InfiniteLine(angle=90, pen=pg.mkPen(MUTED, width=1))
         self.day_plot.addItem(self.day_cursor)
@@ -116,6 +150,8 @@ class Viewer(QtWidgets.QMainWindow):
         mono.setPointSize(10)
         self.info_lbl = QtWidgets.QLabel()
         self.info_lbl.setFont(mono)
+        for lbl in (self.clock_lbl, self.info_lbl):  # so IDs and timestamps can be copied
+            lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         labels.addWidget(self.clock_lbl)
         labels.addStretch()
         labels.addWidget(self.info_lbl)
@@ -144,7 +180,7 @@ class Viewer(QtWidgets.QMainWindow):
 
         self.range_plot = pg.PlotWidget()
         self.range_plot.setLabel("left", "Mid (USD)")
-        self.range_plot.setLabel("bottom", "Book update #")
+        self.range_plot.setLabel("bottom", "Position in loaded range")
         self.range_plot.setTitle("Loaded range: click to jump", color=MUTED, size="9pt")
         self.range_plot.showGrid(x=True, y=True, alpha=0.15)
         self.range_line = self.range_plot.plot(pen=pg.mkPen(TEXT, width=1))
@@ -161,7 +197,9 @@ class Viewer(QtWidgets.QMainWindow):
         self.play_btn.clicked.connect(self.toggle_play)
         buttons = [self.play_btn]
         for label, fn in [("< step", lambda: self.step(-1)), ("step >", lambda: self.step(1)),
-                          ("< trade", lambda: self.jump_trade(-1)), ("trade >", lambda: self.jump_trade(1))]:
+                          ("< trade", lambda: self.jump_trade(-1)), ("trade >", lambda: self.jump_trade(1)),
+                          ("From = here [", lambda: self.mark(self.from_box)),
+                          ("To = here ]", lambda: self.mark(self.to_box))]:
             b = QtWidgets.QPushButton(label)
             b.clicked.connect(fn)
             buttons.append(b)
@@ -211,9 +249,13 @@ class Viewer(QtWidgets.QMainWindow):
             return
         self.path = path
         self.midnight = pd.Timestamp(day_of(path), tz=TZ)
+        self.ticks = None
+        self.set_playback_enabled(False)
+        # IDs count from the first update in the file, pre-market included
+        self.all_sec = (bars.index - self.midnight).total_seconds().to_numpy().astype(np.int64)
+        self.all_cum = bars["updates"].cumsum().to_numpy()
         bars = bars.between_time("09:30", "16:00")
         self.day_sec = (bars.index - self.midnight).total_seconds().to_numpy()
-        self.day_updates = bars["updates"].to_numpy()
         self.day_line.setData(self.day_sec, ((bars["bid_px_00"] + bars["ask_px_00"]) / 2).to_numpy())
         open_ = 9.5 * 3600
         self.day_plot.setXRange(open_, 16 * 3600, padding=0.01)
@@ -227,29 +269,69 @@ class Viewer(QtWidgets.QMainWindow):
         lo, hi = self.region.getRegion()
         self.region.setRegion([x, x + hi - lo])
 
-    def selected(self):
+    def on_region(self):
+        if getattr(self, "syncing", False):
+            return
         lo, hi = self.region.getRegion()
-        return int(lo), int(np.ceil(hi))
+        self.from_box.setText(clock(int(lo)))
+        self.to_box.setText(clock(int(np.ceil(hi)) - 1))  # To is inclusive, so the last whole second
+        self.update_estimate()
+
+    def updates_before(self, sec):
+        k = np.searchsorted(self.all_sec, sec)
+        return int(self.all_cum[k - 1]) if k else 0
+
+    def id_second(self, update_id):
+        k = np.searchsorted(self.all_cum, update_id)
+        if update_id < 1 or k >= len(self.all_cum):
+            raise ValueError(f"no update #{update_id:,} in this file (last is #{int(self.all_cum[-1]):,})")
+        return int(self.all_sec[k])
+
+    def bounds(self):
+        """Parsed From/To, plus the whole seconds [lo, hi) that have to be decoded to cover them."""
+        frm, to = parse_point(self.from_box.text()), parse_point(self.to_box.text())
+        lo = self.id_second(frm[1]) if frm[0] == "id" else frm[1] // NS
+        hi = (self.id_second(to[1]) if to[0] == "id" else to[1] // NS) + 1
+        if hi <= lo:
+            raise ValueError("From is after To")
+        return frm, to, lo, hi
 
     def update_estimate(self):
-        if not hasattr(self, "day_sec"):
+        if not hasattr(self, "all_sec"):
             return
-        lo, hi = self.selected()
-        n = int(self.day_updates[(self.day_sec >= lo) & (self.day_sec < hi)].sum())
-        self.estimate.setText(f"  {clock(lo)} - {clock(hi)}  |  {n:,} updates  ")
+        try:
+            frm, to, lo, hi = self.bounds()
+        except ValueError as e:
+            self.estimate.setText(f"  {e}  ")
+            self.estimate.setStyleSheet("color: #ec4647")
+            return
+        n = self.updates_before(hi) - self.updates_before(lo)
+        exact = frm[0] == to[0] == "id"
+        count = f"{to[1] - frm[1] + 1:,} updates" if exact else f"up to {n:,} updates"
+        self.estimate.setText(f"  {count}  ")
         self.estimate.setStyleSheet("color: #ec4647" if n > MAX_LOAD else "")
 
     def load_range(self):
-        if self.busy or not hasattr(self, "day_sec"):
+        focused = QtWidgets.QApplication.focusWidget()
+        if focused:
+            focused.clearFocus()  # hand the keyboard back to playback after typing
+        if self.busy or not hasattr(self, "all_sec"):
             return
-        lo, hi = self.selected()
-        n = int(self.day_updates[(self.day_sec >= lo) & (self.day_sec < hi)].sum())
+        try:
+            frm, to, lo, hi = self.bounds()
+        except ValueError as e:
+            self.status.setText(f"Can't load: {e}")
+            return
+        n = self.updates_before(hi) - self.updates_before(lo)
         if n > MAX_LOAD:
             self.status.setText(f"{n:,} updates is too many to load at once (max {MAX_LOAD:,}). Narrow the range.")
             return
+        self.syncing = True  # move the band without overwriting what was typed
+        self.region.setRegion([lo, hi])
+        self.syncing = False
         start, end = self.midnight + pd.Timedelta(seconds=lo), self.midnight + pd.Timedelta(seconds=hi)
         self.pause()
-        self.loading_span = (clock(lo), clock(hi))
+        self.pending = (frm, to, lo)
         self.run_in_background(lambda: ticks_for(self.path, start, end, self.out_dir), self.range_loaded,
                                f"Decoding {clock(lo)} - {clock(hi)} ...")
 
@@ -258,10 +340,23 @@ class Viewer(QtWidgets.QMainWindow):
         if isinstance(ticks, Exception):
             self.status.setText(f"Failed: {ticks}")
             return
+        frm, to, lo = self.pending
+        ids = self.updates_before(lo) + np.arange(1, len(ticks) + 1)
+        tick_ns = ticks.index.asi8 - self.midnight.value
+        keep = (ids >= frm[1]) if frm[0] == "id" else (tick_ns >= frm[1])
+        if to[0] == "id":
+            keep &= ids <= to[1]
+        else:
+            # a whole second like 10:47:35 means up to the end of that second
+            keep &= (tick_ns < to[1] + NS) if to[2] else (tick_ns <= to[1])
+        ticks = ticks[keep].assign(update_id=ids[keep])
         if ticks.empty:
             self.status.setText("No book updates in that range.")
             return
         self.ticks = ticks
+        self.ids = ticks["update_id"].to_numpy()
+        self.seq = ticks["sequence"].to_numpy()
+        tick_ns = tick_ns[keep]
         self.bid_px, self.ask_px = ticks[BID_PX].to_numpy(), ticks[ASK_PX].to_numpy()
         self.bid_sz, self.ask_sz = ticks[BID_SZ].to_numpy(), ticks[ASK_SZ].to_numpy()
         self.mid = (self.bid_px[:, 0] + self.ask_px[:, 0]) / 2
@@ -270,9 +365,8 @@ class Viewer(QtWidgets.QMainWindow):
         self.trade_px = ticks["trade_px"].to_numpy(float)
         self.buy, self.sell = ticks["buy_vol"].to_numpy(), ticks["sell_vol"].to_numpy()
         self.trades = np.flatnonzero(~np.isnan(self.trade_px))
-        self.tick_sec = (ticks.index - self.midnight).total_seconds().to_numpy()
-        self.labels = [t.strftime("%Y-%m-%d  %H:%M:%S.%f  New York") for t in ticks.index]
-        self.range_span = self.loading_span  # same start/end as the cached decode, so export reuses it
+        self.tick_sec = tick_ns / NS
+        self.labels = [f"{t:%Y-%m-%d  %H:%M:%S}.{ns % NS:09d}  New York" for t, ns in zip(ticks.index, tick_ns)]
 
         n = len(ticks)
         xmax = np.percentile(np.concatenate([self.bid_sz, self.ask_sz]), 99.5) * 1.1
@@ -281,7 +375,8 @@ class Viewer(QtWidgets.QMainWindow):
         self.range_plot.autoRange()
         self.pos_slider.setRange(0, n - 1)
         self.set_playback_enabled(True)
-        self.status.setText(f"Loaded {n:,} updates, {len(self.trades):,} with trades. Space to play.")
+        self.status.setText(f"Loaded #{self.ids[0]:,} - #{self.ids[-1]:,}: {n:,} updates, "
+                            f"{len(self.trades):,} with trades. Space to play.")
         self.seek(0)
 
     def set_playback_enabled(self, on):
@@ -312,9 +407,9 @@ class Viewer(QtWidgets.QMainWindow):
 
         spread = round((ask_px[0] - bid_px[0]) / TICK)
         self.clock_lbl.setText(self.labels[i])
-        self.info_lbl.setText(f"spread {spread} tick{'s' if spread != 1 else ''}   |   "
-                              f"update {i + 1:,}/{len(self.ticks):,}   |   "
-                              f"buy {int(self.buy[i]):,} sh   sell {int(self.sell[i]):,} sh")
+        self.info_lbl.setText(f"update #{self.ids[i]:,}  ({i + 1:,}/{len(self.ticks):,})   |   "
+                              f"venue seq {self.seq[i]}   |   spread {spread} tick{'s' if spread != 1 else ''}"
+                              f"   |   buy {int(self.buy[i]):,} sh   sell {int(self.sell[i]):,} sh")
         self.range_cursor.setValue(i)
         self.range_dot.setData([i], [mid])
         self.day_cursor.setValue(self.tick_sec[i])
@@ -343,6 +438,11 @@ class Viewer(QtWidgets.QMainWindow):
     def on_range_click(self, ev):
         if self.ticks is not None:
             self.step(round(self.range_plot.getViewBox().mapSceneToView(ev.scenePos()).x()) - self.i)
+
+    def mark(self, box):
+        if self.ticks is not None:
+            box.setText(f"#{self.ids[self.i]}")
+            self.update_estimate()
 
     def on_mode(self, mode):
         self.speed.setValue(30 if mode == 0 else 1)
@@ -386,12 +486,15 @@ class Viewer(QtWidgets.QMainWindow):
     def export(self):
         if self.ticks is None:
             return
-        start, end = self.range_span
+        first, last = self.ids[0], self.ids[-1]
+        # hand over exactly what is loaded, so the video matches update for update
+        ticks_file = self.out_dir / f"{self.path.name.split('.')[0]}_{first}-{last}.export.parquet"
+        self.ticks.to_parquet(ticks_file)
         # a second copy of this program does the render, in its own console window showing progress
         cmd = [sys.executable] + ([] if FROZEN else [str(Path(__file__).resolve())]) + [
-            "--render", str(self.path), "--tick", "--start", start, "--end", end, "--out", str(self.out_dir)]
+            "--render", str(self.path), "--tick", "--ticks-file", str(ticks_file), "--out", str(self.out_dir)]
         subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
-        self.status.setText(f"Exporting {start} - {end} to MP4, progress in the new console window.")
+        self.status.setText(f"Exporting #{first:,} - #{last:,} to MP4, progress in the new console window.")
 
 
 def render_and_wait():
