@@ -36,5 +36,7 @@ python viewer.py "D:\your\folder"
 - click the range chart or drag the slider to jump
 - **Export MP4** renders exactly the loaded updates to a video
 
+Tick videos show each frame's update ID and nanosecond timestamp, the same IDs the viewer uses.
+
 Videos longer than 30 minutes are refused (it tells you what range or `--fps` would fit); `--force` overrides.
 Decoded data is cached in `lob_out/` (the viewer and exe put it inside your data folder), so re-rendering skips decoding.

@@ -141,7 +141,8 @@ def render(book, x, info, clock, out, fps, title, change_px=None, change_side=No
     if isinstance(x, pd.DatetimeIndex):
         ax_mid.xaxis.set_major_formatter(DateFormatter("%H:%M", tz=x.tz))
     else:
-        ax_mid.set_xlabel("Book update #", color=MUTED)
+        ax_mid.set_xlabel("Update ID", color=MUTED)
+        ax_mid.xaxis.set_major_formatter(lambda v, _: f"#{v:,.0f}")  # plain IDs, no "1e6 +" offset
     ax_mid.grid(color=GRID, lw=0.8)
     ax_mid.set_title("Mid price so far", fontsize=10, color=MUTED, loc="left")
 
@@ -214,9 +215,17 @@ def overview(path, args, out_dir):
 def tick_by_tick(path, args, out_dir):
     day = day_of(path)
     if args.ticks_file:
-        ticks = pd.read_parquet(args.ticks_file)  # the exact updates the viewer had loaded
+        ticks = pd.read_parquet(args.ticks_file)  # the exact updates the viewer had loaded, IDs included
     else:
-        ticks = ticks_for(path, at(day, args.start), at(day, args.end), out_dir)
+        start, end = at(day, args.start), at(day, args.end)
+        # IDs count updates from the start of the file, the same way the viewer does: decode from a
+        # whole second so the 1s bars can supply the count of everything before it
+        first_sec = start.floor("s")
+        ticks = ticks_for(path, first_sec, end, out_dir)
+        bars = seconds_for(path, out_dir)
+        before = int(bars["updates"][bars.index < first_sec].sum())
+        ticks = ticks.assign(update_id=before + np.arange(1, len(ticks) + 1))
+        ticks = ticks[ticks.index >= start]
     if ticks.empty:
         sys.exit(f"{path.name}: no book updates between {args.start} and {args.end}")
     n = len(ticks)
@@ -224,17 +233,14 @@ def tick_by_tick(path, args, out_dir):
         last_ok = ticks.index[MAX_MINUTES * 60 * args.fps - 1]
         sys.exit(f"  at {args.fps} fps, --end {last_ok:%H:%M:%S.%f} is the furthest that fits")
 
-    ids = ticks["update_id"].to_numpy() if "update_id" in ticks else None
-    labels = [f"#{u:,}" for u in ids] if ids is not None else [f"{i + 1:>7,}/{n:,}" for i in range(n)]
-    info = [f"{s}\nupdate {u}\nbuy  {int(b):>6,} sh\nsell {int(a):>6,} sh"
-            for s, u, b, a in zip(spread_line(ticks), labels, ticks["buy_vol"], ticks["sell_vol"])]
-    clock = [t.strftime("%Y-%m-%d  %H:%M:%S.%f  New York") for t in ticks.index]
-    if ids is not None:
-        span = f"{ids[0]}-{ids[-1]}"
-    else:
-        span = f"{args.start.replace(':', '')}-{args.end.replace(':', '')}"
-    mp4 = out_dir / f"intc_ticks_{day}_{span}.mp4"
-    render(ticks, np.arange(1, n + 1), info, clock, mp4, args.fps, "INTC limit order book, tick by tick",
+    ids = ticks["update_id"].to_numpy()
+    info = [f"{s}\nframe {i + 1:>6,}/{n:,}\nbuy  {int(b):>6,} sh\nsell {int(a):>6,} sh"
+            for i, (s, b, a) in enumerate(zip(spread_line(ticks), ticks["buy_vol"], ticks["sell_vol"]))]
+    sub_second = ticks.index.asi8 % 1_000_000_000
+    clock = [f"{t:%Y-%m-%d  %H:%M:%S}.{ns:09d}  New York    update #{u:,}"
+             for t, ns, u in zip(ticks.index, sub_second, ids)]
+    mp4 = out_dir / f"intc_ticks_{day}_{ticks.index[0]:%H%M%S}_{ids[0]}-{ids[-1]}.mp4"
+    render(ticks, ids, info, clock, mp4, args.fps, "INTC limit order book, tick by tick",
            change_px=ticks["change_px"].to_numpy(float), change_side=ticks["change_side"].to_numpy(),
            trade_px=ticks["trade_px"].to_numpy(float))
     print(f"saved {mp4}")
