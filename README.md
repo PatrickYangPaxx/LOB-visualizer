@@ -37,4 +37,4 @@ python viewer.py "D:\your\folder"
 - **Export MP4** renders exactly the loaded updates to a video
 
 Videos longer than 30 minutes are refused (it tells you what range or `--fps` would fit); `--force` overrides.
-Decoded data is cached in `lob_out/`, so re-rendering skips decoding.
+Decoded data is cached in `lob_out/` (the viewer and exe put it inside your data folder), so re-rendering skips decoding.

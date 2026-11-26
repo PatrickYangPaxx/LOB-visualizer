@@ -29,7 +29,6 @@ from render_book import ASK_COLOR, BID_COLOR, HALF_WINDOW, MUTED, TEXT, day_of, 
 from render_book import main as render_main
 
 FROZEN = getattr(sys, "frozen", False)  # running as the PyInstaller exe
-APP_DIR = Path(sys.executable if FROZEN else __file__).resolve().parent
 
 SELECT_COLOR = (242, 166, 0, 70)
 MAX_LOAD = 1_000_000  # updates; beyond this the decoded range gets too big to hold comfortably
@@ -522,7 +521,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="*", help=".mbp-10.dbn.zst files, a folder of them, or a glob pattern")
-    ap.add_argument("--out", default=str(APP_DIR / "lob_out"), help="folder for the cache and exported mp4s")
+    ap.add_argument("--out", help="folder for the cache and exported mp4s (default: lob_out in the data folder)")
     args = ap.parse_args()
 
     app = QtWidgets.QApplication(sys.argv)
@@ -539,7 +538,8 @@ def main():
     if not files:
         QtWidgets.QMessageBox.warning(None, "LOB viewer", "No .mbp-10.dbn.zst files found there.")
         return
-    out_dir = Path(args.out)
+    # next to the data, not the exe: rebuilding the exe wipes its folder
+    out_dir = Path(args.out) if args.out else files[0].parent / "lob_out"
     out_dir.mkdir(exist_ok=True)
     viewer = Viewer(files, out_dir)
     viewer.show()
