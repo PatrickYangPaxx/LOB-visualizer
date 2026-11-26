@@ -1,0 +1,5 @@
+build/
+dist/
+*.spec
+lob_out/
+__pycache__/

@@ -19,6 +19,10 @@ python render_book.py "D:\your\folder"
 python render_book.py "D:\your\folder" --date 20261028 --tick --start 10:47:00 --end 10:48:00
 ```
 
+**Executable**: double-click `build.bat` on Windows once. It creates `dist\LOBViewer\LOBViewer.exe`.
+Start that (or a shortcut to it); it asks for your data folder and remembers it. Keep the whole
+`dist\LOBViewer` folder together, since the exe needs the `_internal` folder next to it.
+
 **Viewer**: pick a range on the day's chart and play it back tick by tick, live, no rendering wait:
 ```
 python viewer.py "D:\your\folder"

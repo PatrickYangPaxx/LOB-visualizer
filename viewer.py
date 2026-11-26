@@ -7,6 +7,7 @@ then Load. Playback: space = play/pause, left/right = step one update, shift+lef
 t / shift+t = next / previous trade, home/end = jump to the start/end of the range.
 """
 import argparse
+import os
 import subprocess
 import sys
 import threading
@@ -20,6 +21,10 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from lob_data import ASK_PX, ASK_SZ, BID_PX, BID_SZ, TICK, TZ
 from render_book import ASK_COLOR, BID_COLOR, HALF_WINDOW, MUTED, TEXT, day_of, find_files, seconds_for, ticks_for
+from render_book import main as render_main
+
+FROZEN = getattr(sys, "frozen", False)  # running as the PyInstaller exe
+APP_DIR = Path(sys.executable if FROZEN else __file__).resolve().parent
 
 SELECT_COLOR = (242, 166, 0, 70)
 MAX_LOAD = 1_000_000  # updates; beyond this the decoded range gets too big to hold comfortably
@@ -382,24 +387,57 @@ class Viewer(QtWidgets.QMainWindow):
         if self.ticks is None:
             return
         start, end = self.range_span
-        cmd = [sys.executable, str(Path(__file__).with_name("render_book.py")), str(self.path), "--tick",
-               "--start", start, "--end", end, "--out", str(self.out_dir)]
-        subprocess.Popen(cmd)
-        self.status.setText(f"Exporting {start} - {end} to MP4, progress in the terminal.")
+        # a second copy of this program does the render, in its own console window showing progress
+        cmd = [sys.executable] + ([] if FROZEN else [str(Path(__file__).resolve())]) + [
+            "--render", str(self.path), "--tick", "--start", start, "--end", end, "--out", str(self.out_dir)]
+        subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+        self.status.setText(f"Exporting {start} - {end} to MP4, progress in the new console window.")
+
+
+def render_and_wait():
+    sys.argv = [sys.argv[0]] + sys.argv[2:]
+    try:
+        render_main()
+    except SystemExit as e:  # render_book exits with a message, e.g. over the length cap
+        if e.code not in (None, 0):
+            print(e.code)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    input("\nPress Enter to close")
 
 
 def main():
+    if sys.argv[1:2] == ["--render"]:
+        render_and_wait()
+        return
+    if FROZEN and sys.platform == "win32":
+        # the exe is a console app so exports get a progress window; the viewer itself doesn't need one
+        import ctypes
+        ctypes.windll.kernel32.FreeConsole()
+        sys.stdout = sys.stderr = open(os.devnull, "w")
+
     ap = argparse.ArgumentParser()
-    ap.add_argument("files", nargs="+", help=".mbp-10.dbn.zst files, a folder of them, or a glob pattern")
-    ap.add_argument("--out", default="lob_out", help="folder for the cache and exported mp4s")
+    ap.add_argument("files", nargs="*", help=".mbp-10.dbn.zst files, a folder of them, or a glob pattern")
+    ap.add_argument("--out", default=str(APP_DIR / "lob_out"), help="folder for the cache and exported mp4s")
     args = ap.parse_args()
 
-    files = find_files(args.files)
+    app = QtWidgets.QApplication(sys.argv)
+    if args.files:
+        files = find_files(args.files)
+    else:
+        settings = QtCore.QSettings("LOB-visualizer", "viewer")
+        folder = QtWidgets.QFileDialog.getExistingDirectory(None, "Folder with .mbp-10.dbn.zst files",
+                                                            settings.value("folder", ""))
+        if not folder:
+            return
+        settings.setValue("folder", folder)
+        files = find_files([folder])
     if not files:
-        ap.error("no matching files")
+        QtWidgets.QMessageBox.warning(None, "LOB viewer", "No .mbp-10.dbn.zst files found there.")
+        return
     out_dir = Path(args.out)
     out_dir.mkdir(exist_ok=True)
-    app = QtWidgets.QApplication(sys.argv)
     viewer = Viewer(files, out_dir)
     viewer.show()
     sys.exit(app.exec())
