@@ -16,7 +16,6 @@ from pathlib import Path
 
 import imageio_ffmpeg
 import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter
 from matplotlib.dates import DateFormatter
@@ -75,7 +74,9 @@ def fits(n, fps, force):
 def seconds_for(path, cache_dir):
     cache = cache_dir / f"{path.name.split('.')[0]}.bars1s.parquet"
     if cache.exists():
-        return pd.read_parquet(cache)
+        bars = pd.read_parquet(cache)
+        if "updates" in bars:  # caches from before the viewer lack it
+            return bars
     print(f"decoding {path.name} (cached after the first run) ...")
     bars = load_seconds(path)
     bars.to_parquet(cache)
@@ -231,6 +232,8 @@ def tick_by_tick(path, args, out_dir):
 
 
 def main():
+    # set here, not at import, so viewer.py can import this module and keep its window
+    matplotlib.use("Agg")
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+", help=".mbp-10.dbn.zst files, a folder of them, or a glob pattern")
     ap.add_argument("--start", default="09:30", help="New York time HH:MM or HH:MM:SS[.ffffff]")

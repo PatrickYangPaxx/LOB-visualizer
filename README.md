@@ -19,5 +19,15 @@ python render_book.py "D:\your\folder"
 python render_book.py "D:\your\folder" --date 20261028 --tick --start 10:47:00 --end 10:48:00
 ```
 
+**Viewer**: scrub through a day and pick the tick range by clicking instead of typing times:
+```
+python viewer.py "D:\your\folder"
+```
+- click the mid-price chart or drag the slider to move; zoom with the toolbar magnifier
+- left/right arrow = 1 s, shift + arrow = 1 min
+- `s` = set start, `e` = set end, the end second is included
+- `enter` = render that range tick by tick (progress shows in the terminal)
+- `< day` / `day >` switch between files
+
 Videos longer than 30 minutes are refused (it tells you what range or `--fps` would fit); `--force` overrides.
 Decoded data is cached in `lob_out/`, so re-rendering skips decoding.

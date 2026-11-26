@@ -26,7 +26,8 @@ def valid(df):
 
 
 def load_seconds(path):
-    """1s bars: the book as it stood at the end of each second, plus shares traded during it."""
+    """1s bars: the book as it stood at the end of each second, plus shares traded and
+    finished book updates (= tick-mode frames) during it."""
     parts = []
     for df in chunks(path):
         df = valid(df)
@@ -35,11 +36,12 @@ def load_seconds(path):
         sec = df.index.floor("s")
         part = df[BOOK].groupby(sec).last()
         part["volume"] = df["size"].where(df["action"] == "T", 0).groupby(sec).sum()
+        part["updates"] = ((df["flags"] & F_LAST) > 0).groupby(sec).sum()
         parts.append(part)
     bars = pd.concat(parts)
-    # a second split across two chunks shows up twice: keep the last book, sum the volume
-    volume = bars["volume"].groupby(level=0).sum()
-    return bars[BOOK].groupby(level=0).last().join(volume)
+    # a second split across two chunks shows up twice: keep the last book, sum the flow
+    flow = bars[["volume", "updates"]].groupby(level=0).sum()
+    return bars[BOOK].groupby(level=0).last().join(flow)
 
 
 def load_ticks(path, start, end):
