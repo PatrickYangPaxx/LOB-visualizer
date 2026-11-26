@@ -19,15 +19,15 @@ python render_book.py "D:\your\folder"
 python render_book.py "D:\your\folder" --date 20261028 --tick --start 10:47:00 --end 10:48:00
 ```
 
-**Viewer**: scrub through a day and pick the tick range by clicking instead of typing times:
+**Viewer**: pick a range on the day's chart and play it back tick by tick, live, no rendering wait:
 ```
 python viewer.py "D:\your\folder"
 ```
-- click the mid-price chart or drag the slider to move; zoom with the toolbar magnifier
-- left/right arrow = 1 s, shift + arrow = 1 min
-- `s` = set start, `e` = set end, the end second is included
-- `enter` = render that range tick by tick (progress shows in the terminal)
-- `< day` / `day >` switch between files
+- top chart: drag the yellow band's edges to choose a range, double-click to move it, scroll to zoom, then **Load range**
+- space = play/pause, left/right = one update, shift + arrow = 100 updates, t / shift+t = next / previous trade, home/end
+- speed is either updates per second, or a multiple of real market time (1 = real speed)
+- click the range chart or drag the slider to jump
+- **Export MP4** renders the loaded range to a video with `render_book.py`
 
 Videos longer than 30 minutes are refused (it tells you what range or `--fps` would fit); `--force` overrides.
 Decoded data is cached in `lob_out/`, so re-rendering skips decoding.
