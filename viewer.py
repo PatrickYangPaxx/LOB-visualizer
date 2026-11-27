@@ -12,11 +12,13 @@ t / shift+t = next / previous trade, home/end = start/end of the range,
 [ / ] = set From / To to the current update.
 """
 import argparse
+import html
 import os
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +57,44 @@ def parse_point(text):
         raise bad
     h, m, s = map(int, parts)
     return "ns", ((h * 60 + m) * 60 + s) * NS + int(frac.ljust(9, "0")), not frac
+
+
+def select(ticks, first_id, frm, to, midnight_ns):
+    """Rows of a decoded window that fall inside From/To, with their update IDs attached."""
+    ids = first_id + np.arange(len(ticks))
+    tick_ns = ticks.index.asi8 - midnight_ns
+    keep = (ids >= frm[1]) if frm[0] == "id" else (tick_ns >= frm[1])
+    if to[0] == "id":
+        keep &= ids <= to[1]
+    else:
+        # a whole second like 10:47:35 means up to the end of that second
+        keep &= (tick_ns < to[1] + NS) if to[2] else (tick_ns <= to[1])
+    return ticks[keep].assign(update_id=ids[keep])
+
+
+def data_table(ticks, levels, trades, changes, sequence):
+    """The columns written by the data export, one row per book update."""
+    ns = ticks.index.asi8
+    out = pd.DataFrame({
+        "update_id": ticks["update_id"].to_numpy(),
+        "time_ny": [f"{t:%Y-%m-%d %H:%M:%S}.{n % NS:09d}" for t, n in zip(ticks.index, ns)],
+        "ts_recv_ns": ns,  # nanoseconds since 1970-01-01 UTC, for joining with other data
+    })
+    if sequence:
+        out["sequence"] = ticks["sequence"].to_numpy()
+    bid, ask = ticks["bid_px_00"].to_numpy(), ticks["ask_px_00"].to_numpy()
+    out["mid"] = (bid + ask) / 2
+    out["spread_ticks"] = np.round((ask - bid) / TICK).astype(int)
+    for i in range(levels):
+        for col in (f"bid_px_{i:02d}", f"bid_sz_{i:02d}", f"ask_px_{i:02d}", f"ask_sz_{i:02d}"):
+            out[col] = ticks[col].to_numpy()
+    if trades:
+        for col in ("buy_vol", "sell_vol", "trade_px"):
+            out[col] = ticks[col].to_numpy()
+    if changes:
+        out["change_side"] = ticks["change_side"].to_numpy()
+        out["change_px"] = ticks["change_px"].to_numpy()
+    return out
 
 
 class ClockAxis(pg.AxisItem):
@@ -117,9 +157,11 @@ class Viewer(QtWidgets.QMainWindow):
         self.load_btn.clicked.connect(self.load_range)
         self.export_btn = QtWidgets.QPushButton("Export MP4")
         self.export_btn.clicked.connect(self.export)
+        self.data_btn = QtWidgets.QPushButton("Export data")
+        self.data_btn.setCheckable(True)
         self.status = QtWidgets.QLabel()
         for w in (self.day_box, QtWidgets.QLabel("From"), self.from_box, QtWidgets.QLabel("To"), self.to_box,
-                  self.load_btn, self.estimate, self.export_btn):
+                  self.load_btn, self.estimate, self.export_btn, self.data_btn):
             top.addWidget(w)
         top.addStretch()
         top.addWidget(self.status)
@@ -212,13 +254,82 @@ class Viewer(QtWidgets.QMainWindow):
         self.pos_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.pos_slider.valueChanged.connect(lambda v: self.seek(v) if v != getattr(self, "i", None) else None)
         # keep space and arrows for playback instead of whichever control has focus
-        for w in buttons + [self.mode_box, self.pos_slider, self.day_box, self.load_btn, self.export_btn]:
+        for w in buttons + [self.mode_box, self.pos_slider, self.day_box, self.load_btn, self.export_btn,
+                            self.data_btn]:
             w.setFocusPolicy(QtCore.Qt.NoFocus)
         for w in buttons + [QtWidgets.QLabel("Speed"), self.speed, self.mode_box]:
             controls.addWidget(w)
         controls.addWidget(self.pos_slider, 1)
         root.addLayout(controls)
+        self.playback_widgets = buttons + [self.speed, self.mode_box, self.pos_slider, self.export_btn]
         self.set_playback_enabled(False)
+        self.build_data_panel()
+
+    def build_data_panel(self):
+        self.dock = QtWidgets.QDockWidget("Export tick data", self)
+        self.dock.setObjectName("data_panel")
+        panel = QtWidgets.QWidget()
+        outer = QtWidgets.QVBoxLayout(panel)
+        form = QtWidgets.QFormLayout()
+        outer.addLayout(form)
+        outer.addStretch()
+
+        self.x_from, self.x_to = QtWidgets.QLineEdit(), QtWidgets.QLineEdit()
+        for label, box in [("From", self.x_from), ("To", self.x_to)]:
+            box.setPlaceholderText("HH:MM:SS.fff or #ID")
+            box.textEdited.connect(self.update_data_count)
+            here = QtWidgets.QPushButton("here")
+            here.setToolTip("the update on screen")
+            here.clicked.connect(lambda _=False, b=box: self.mark(b))
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(box, 1)
+            row.addWidget(here)
+            form.addRow(label, row)
+        use_loaded = QtWidgets.QPushButton("Use loaded range")
+        use_loaded.clicked.connect(self.use_loaded_range)
+        form.addRow("", use_loaded)
+        self.x_count = QtWidgets.QLabel()
+        form.addRow("", self.x_count)
+
+        self.x_levels = QtWidgets.QSpinBox()
+        self.x_levels.setRange(1, 10)
+        self.x_levels.setValue(10)
+        form.addRow("Book levels", self.x_levels)
+        self.x_trades = QtWidgets.QCheckBox("Trades: buy / sell volume, trade price")
+        self.x_changes = QtWidgets.QCheckBox("Changed level: side, price")
+        self.x_seq = QtWidgets.QCheckBox("Venue sequence number")
+        for box in (self.x_trades, self.x_changes, self.x_seq):
+            box.setChecked(True)
+            form.addRow("", box)
+        always = QtWidgets.QLabel("Always included: update ID, time, mid, spread")
+        always.setWordWrap(True)
+        form.addRow("", always)
+
+        self.x_note = QtWidgets.QPlainTextEdit()
+        self.x_note.setPlaceholderText("Optional, saved in the info file")
+        self.x_note.setFixedHeight(70)
+        form.addRow("Note", self.x_note)
+        self.x_info = QtWidgets.QCheckBox("Save an info file (.txt) next to the data")
+        self.x_info.setChecked(True)
+        form.addRow("", self.x_info)
+
+        self.x_btn = QtWidgets.QPushButton("Export...")
+        self.x_btn.clicked.connect(self.export_data)
+        form.addRow("", self.x_btn)
+        self.x_status = QtWidgets.QLabel()
+        self.x_status.setWordWrap(True)
+        self.x_status.setTextFormat(QtCore.Qt.RichText)
+        self.x_status.setOpenExternalLinks(True)
+        form.addRow("", self.x_status)
+        for w in panel.findChildren(QtWidgets.QAbstractButton):
+            w.setFocusPolicy(QtCore.Qt.NoFocus)
+
+        panel.setFixedWidth(330)
+        self.dock.setWidget(panel)
+        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.dock)
+        self.dock.visibilityChanged.connect(self.data_btn.setChecked)
+        self.data_btn.toggled.connect(self.dock.setVisible)
+        self.dock.hide()
 
     def run_in_background(self, fn, callback, message):
         self.busy = True
@@ -286,29 +397,35 @@ class Viewer(QtWidgets.QMainWindow):
             raise ValueError(f"no update #{update_id:,} in this file (last is #{int(self.all_cum[-1]):,})")
         return int(self.all_sec[k])
 
-    def bounds(self):
+    def bounds(self, from_box, to_box):
         """Parsed From/To, plus the whole seconds [lo, hi) that have to be decoded to cover them."""
-        frm, to = parse_point(self.from_box.text()), parse_point(self.to_box.text())
+        frm, to = parse_point(from_box.text()), parse_point(to_box.text())
         lo = self.id_second(frm[1]) if frm[0] == "id" else frm[1] // NS
         hi = (self.id_second(to[1]) if to[0] == "id" else to[1] // NS) + 1
         if hi <= lo:
             raise ValueError("From is after To")
         return frm, to, lo, hi
 
-    def update_estimate(self):
+    def show_count(self, label, from_box, to_box):
         if not hasattr(self, "all_sec"):
             return
         try:
-            frm, to, lo, hi = self.bounds()
+            frm, to, lo, hi = self.bounds(from_box, to_box)
         except ValueError as e:
-            self.estimate.setText(f"  {e}  ")
-            self.estimate.setStyleSheet("color: #ec4647")
+            label.setText(f"  {e}  ")
+            label.setStyleSheet("color: #ec4647")
             return
         n = self.updates_before(hi) - self.updates_before(lo)
         exact = frm[0] == to[0] == "id"
         count = f"{to[1] - frm[1] + 1:,} updates" if exact else f"up to {n:,} updates"
-        self.estimate.setText(f"  {count}  ")
-        self.estimate.setStyleSheet("color: #ec4647" if n > MAX_LOAD else "")
+        label.setText(f"  {count}  ")
+        label.setStyleSheet("color: #ec4647" if n > MAX_LOAD else "")
+
+    def update_estimate(self):
+        self.show_count(self.estimate, self.from_box, self.to_box)
+
+    def update_data_count(self):
+        self.show_count(self.x_count, self.x_from, self.x_to)
 
     def load_range(self):
         focused = QtWidgets.QApplication.focusWidget()
@@ -317,7 +434,7 @@ class Viewer(QtWidgets.QMainWindow):
         if self.busy or not hasattr(self, "all_sec"):
             return
         try:
-            frm, to, lo, hi = self.bounds()
+            frm, to, lo, hi = self.bounds(self.from_box, self.to_box)
         except ValueError as e:
             self.status.setText(f"Can't load: {e}")
             return
@@ -330,7 +447,7 @@ class Viewer(QtWidgets.QMainWindow):
         self.syncing = False
         start, end = self.midnight + pd.Timedelta(seconds=lo), self.midnight + pd.Timedelta(seconds=hi)
         self.pause()
-        self.pending = (frm, to, lo)
+        self.pending = (frm, to, lo, hi)
         self.run_in_background(lambda: ticks_for(self.path, start, end, self.out_dir), self.range_loaded,
                                f"Decoding {clock(lo)} - {clock(hi)} ...")
 
@@ -339,23 +456,18 @@ class Viewer(QtWidgets.QMainWindow):
         if isinstance(ticks, Exception):
             self.status.setText(f"Failed: {ticks}")
             return
-        frm, to, lo = self.pending
-        ids = self.updates_before(lo) + np.arange(1, len(ticks) + 1)
-        tick_ns = ticks.index.asi8 - self.midnight.value
-        keep = (ids >= frm[1]) if frm[0] == "id" else (tick_ns >= frm[1])
-        if to[0] == "id":
-            keep &= ids <= to[1]
-        else:
-            # a whole second like 10:47:35 means up to the end of that second
-            keep &= (tick_ns < to[1] + NS) if to[2] else (tick_ns <= to[1])
-        ticks = ticks[keep].assign(update_id=ids[keep])
+        frm, to, lo, hi = self.pending
+        self.window = (lo, hi, ticks)  # the whole decoded seconds, so data exports inside it skip decoding
+        ticks = select(ticks, self.updates_before(lo) + 1, frm, to, self.midnight.value)
         if ticks.empty:
             self.status.setText("No book updates in that range.")
             return
         self.ticks = ticks
         self.ids = ticks["update_id"].to_numpy()
         self.seq = ticks["sequence"].to_numpy()
-        tick_ns = tick_ns[keep]
+        tick_ns = ticks.index.asi8 - self.midnight.value
+        if not self.x_from.text() and not self.x_to.text():
+            self.use_loaded_range()
         self.bid_px, self.ask_px = ticks[BID_PX].to_numpy(), ticks[ASK_PX].to_numpy()
         self.bid_sz, self.ask_sz = ticks[BID_SZ].to_numpy(), ticks[ASK_SZ].to_numpy()
         self.mid = (self.bid_px[:, 0] + self.ask_px[:, 0]) / 2
@@ -379,9 +491,8 @@ class Viewer(QtWidgets.QMainWindow):
         self.seek(0)
 
     def set_playback_enabled(self, on):
-        for w in self.findChildren(QtWidgets.QPushButton) + [self.speed, self.mode_box, self.pos_slider]:
-            if w is not self.load_btn:
-                w.setEnabled(on)
+        for w in self.playback_widgets:
+            w.setEnabled(on)
 
     def show_frame(self, i):
         self.i = i
@@ -442,6 +553,94 @@ class Viewer(QtWidgets.QMainWindow):
         if self.ticks is not None:
             box.setText(f"#{self.ids[self.i]}")
             self.update_estimate()
+            self.update_data_count()
+
+    def use_loaded_range(self):
+        if self.ticks is not None:
+            self.x_from.setText(f"#{self.ids[0]}")
+            self.x_to.setText(f"#{self.ids[-1]}")
+            self.update_data_count()
+
+    def export_data(self):
+        if self.busy or not hasattr(self, "all_sec"):
+            return
+        try:
+            frm, to, lo, hi = self.bounds(self.x_from, self.x_to)
+        except ValueError as e:
+            self.x_status.setText(f"Can't export: {e}")
+            return
+        n = self.updates_before(hi) - self.updates_before(lo)
+        if n > MAX_LOAD:
+            self.x_status.setText(f"{n:,} updates is too many at once (max {MAX_LOAD:,}). Split the range.")
+            return
+        midnight, first_id = self.midnight.value, self.updates_before(lo) + 1
+        window = getattr(self, "window", None)
+        if self.ticks is not None and window and window[0] <= lo and hi <= window[1]:
+            w_lo, _, raw = window
+            self.data_ready(select(raw, self.updates_before(w_lo) + 1, frm, to, midnight))
+            return
+        start, end = self.midnight + pd.Timedelta(seconds=lo), self.midnight + pd.Timedelta(seconds=hi)
+        self.x_status.setText("Decoding ...")
+        self.run_in_background(lambda: select(ticks_for(self.path, start, end, self.out_dir), first_id, frm, to,
+                                              midnight),
+                               self.data_ready, f"Decoding {clock(lo)} - {clock(hi)} for export ...")
+
+    def data_ready(self, ticks):
+        self.busy = False
+        self.status.setText("")
+        if isinstance(ticks, Exception):
+            self.x_status.setText(f"Failed: {ticks}")
+            return
+        if ticks.empty:
+            self.x_status.setText("No book updates in that range.")
+            return
+        first, last = int(ticks["update_id"].iloc[0]), int(ticks["update_id"].iloc[-1])
+        settings = QtCore.QSettings("LOB-visualizer", "viewer")
+        folder = Path(settings.value("export_dir", str(self.path.parent)))
+        name = f"intc_{day_of(self.path)}_{first}-{last}.csv"
+        chosen, kind = QtWidgets.QFileDialog.getSaveFileName(self, "Save tick data", str(folder / name),
+                                                             "CSV (*.csv);;Parquet (*.parquet)")
+        if not chosen:
+            self.x_status.setText("Export cancelled.")
+            return
+        path = Path(chosen).resolve()
+        if path.suffix.lower() not in (".csv", ".parquet"):
+            path = path.with_suffix(".parquet" if kind.startswith("Parquet") else ".csv")
+        settings.setValue("export_dir", str(path.parent))
+
+        options = (self.x_levels.value(), self.x_trades.isChecked(), self.x_changes.isChecked(),
+                   self.x_seq.isChecked())
+        write_info, note, source = self.x_info.isChecked(), self.x_note.toPlainText().strip(), self.path
+
+        def write():
+            table = data_table(ticks, *options)
+            if path.suffix.lower() == ".parquet":
+                table.to_parquet(path, index=False)
+            else:
+                table.to_csv(path, index=False)
+            if write_info:
+                path.with_suffix(".txt").write_text("\n".join([
+                    f"data:     {path.name}",
+                    f"source:   {source}",
+                    f"updates:  #{first:,} - #{last:,} ({len(table):,} rows)",
+                    f"time:     {table['time_ny'].iloc[0]} - {table['time_ny'].iloc[-1]} New York",
+                    f"columns:  {', '.join(table.columns)}",
+                    f"exported: {datetime.now():%Y-%m-%d %H:%M:%S}",
+                    f"note:     {note}",
+                ]) + "\n", encoding="utf-8")
+            return path
+
+        self.x_status.setText(f"Writing {len(ticks):,} rows ...")
+        self.run_in_background(write, self.data_written, f"Writing {path.name} ...")
+
+    def data_written(self, path):
+        self.busy = False
+        self.status.setText("")
+        if isinstance(path, Exception):
+            self.x_status.setText(f"Failed to write: {path}")
+            return
+        folder = QtCore.QUrl.fromLocalFile(str(path.parent)).toString()
+        self.x_status.setText(f'Saved {html.escape(str(path))}<br><a href="{folder}">Open folder</a>')
 
     def on_mode(self, mode):
         self.speed.setValue(30 if mode == 0 else 1)

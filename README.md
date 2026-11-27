@@ -35,6 +35,10 @@ python viewer.py "D:\your\folder"
 - speed is either updates per second, or a multiple of real market time (1 = real speed)
 - click the range chart or drag the slider to jump
 - **Export MP4** renders exactly the loaded updates to a video
+- **Export data** opens a side panel to save tick data for any range (IDs or times, not only the loaded one)
+  as CSV or Parquet, to a folder you choose. Columns: update ID, nanosecond time, mid, spread, plus your choice of
+  book levels, trades, changed level and venue sequence. An optional `.txt` info file next to it records the source,
+  range, columns and your note
 
 Tick videos show each frame's update ID and nanosecond timestamp, the same IDs the viewer uses.
 
