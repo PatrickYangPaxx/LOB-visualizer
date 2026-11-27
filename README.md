@@ -34,6 +34,7 @@ python viewer.py "D:\your\folder"
 - space = play/pause, left/right = one update, shift + arrow = 100 updates, t / shift+t = next / previous trade, home/end
 - speed is either updates per second, or a multiple of real market time (1 = real speed)
 - click the range chart or drag the slider to jump
+- type an update ID in the `update #` box (or press `G`) and Enter to jump to it; an ID outside the loaded range loads the 1,000 updates either side of it
 - **Export MP4** renders exactly the loaded updates to a video
 - **Export data** opens a side panel to save tick data for any range (IDs or times, not only the loaded one)
   as CSV or Parquet, to a folder you choose. Columns: update ID, nanosecond time, mid, spread, plus your choice of

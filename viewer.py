@@ -119,6 +119,7 @@ class Viewer(QtWidgets.QMainWindow):
         self.ticks = None
         self.busy = False
         self.playing = False
+        self.jump_after_load = None
         self.finished.connect(lambda callback, result: callback(result))
         self.setWindowTitle("LOB viewer")
         self.resize(1500, 900)
@@ -130,7 +131,8 @@ class Viewer(QtWidgets.QMainWindow):
                          ("Shift+Right", lambda: self.step(100)), ("Shift+Left", lambda: self.step(-100)),
                          ("T", lambda: self.jump_trade(1)), ("Shift+T", lambda: self.jump_trade(-1)),
                          ("Home", lambda: self.seek(0)), ("End", lambda: self.seek(len(self.ticks) - 1)),
-                         ("[", lambda: self.mark(self.from_box)), ("]", lambda: self.mark(self.to_box))]:
+                         ("[", lambda: self.mark(self.from_box)), ("]", lambda: self.mark(self.to_box)),
+                         ("G", lambda: (self.jump_box.setFocus(), self.jump_box.selectAll()))]:
             QtGui.QShortcut(QtGui.QKeySequence(keys), self, fn)
         self.load_day(0)
 
@@ -190,12 +192,20 @@ class Viewer(QtWidgets.QMainWindow):
         self.clock_lbl.setFont(mono)
         mono.setPointSize(10)
         self.info_lbl = QtWidgets.QLabel()
-        self.info_lbl.setFont(mono)
+        self.pos_lbl = QtWidgets.QLabel()
+        update_lbl = QtWidgets.QLabel("update #")
+        self.jump_box = QtWidgets.QLineEdit()
+        self.jump_box.setFixedWidth(110)
+        self.jump_box.setToolTip("Type an update ID and press Enter to jump to it (shortcut: G)")
+        self.jump_box.returnPressed.connect(self.jump_to_id)
+        for w in (self.info_lbl, self.pos_lbl, update_lbl, self.jump_box):
+            w.setFont(mono)
         for lbl in (self.clock_lbl, self.info_lbl):  # so IDs and timestamps can be copied
             lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         labels.addWidget(self.clock_lbl)
         labels.addStretch()
-        labels.addWidget(self.info_lbl)
+        for w in (update_lbl, self.jump_box, self.pos_lbl, self.info_lbl):
+            labels.addWidget(w)
         root.addLayout(labels)
 
         plots = QtWidgets.QHBoxLayout()
@@ -457,6 +467,7 @@ class Viewer(QtWidgets.QMainWindow):
             self.status.setText(f"Failed: {ticks}")
             return
         frm, to, lo, hi = self.pending
+        target, self.jump_after_load = self.jump_after_load, None
         self.window = (lo, hi, ticks)  # the whole decoded seconds, so data exports inside it skip decoding
         ticks = select(ticks, self.updates_before(lo) + 1, frm, to, self.midnight.value)
         if ticks.empty:
@@ -488,7 +499,8 @@ class Viewer(QtWidgets.QMainWindow):
         self.set_playback_enabled(True)
         self.status.setText(f"Loaded #{self.ids[0]:,} - #{self.ids[-1]:,}: {n:,} updates, "
                             f"{len(self.trades):,} with trades. Space to play.")
-        self.seek(0)
+        k = np.searchsorted(self.ids, target) if target else 0
+        self.seek(k if target and k < n and self.ids[k] == target else 0)
 
     def set_playback_enabled(self, on):
         for w in self.playback_widgets:
@@ -517,8 +529,10 @@ class Viewer(QtWidgets.QMainWindow):
 
         spread = round((ask_px[0] - bid_px[0]) / TICK)
         self.clock_lbl.setText(self.labels[i])
-        self.info_lbl.setText(f"update #{self.ids[i]:,}  ({i + 1:,}/{len(self.ticks):,})   |   "
-                              f"venue seq {self.seq[i]}   |   spread {spread} tick{'s' if spread != 1 else ''}"
+        if not self.jump_box.hasFocus():  # don't overwrite what's being typed
+            self.jump_box.setText(f"{self.ids[i]:,}")
+        self.pos_lbl.setText(f" ({i + 1:,}/{len(self.ticks):,})")
+        self.info_lbl.setText(f"   |   venue seq {self.seq[i]}   |   spread {spread} tick{'s' if spread != 1 else ''}"
                               f"   |   buy {int(self.buy[i]):,} sh   sell {int(self.sell[i]):,} sh")
         self.range_cursor.setValue(i)
         self.range_dot.setData([i], [mid])
@@ -548,6 +562,33 @@ class Viewer(QtWidgets.QMainWindow):
     def on_range_click(self, ev):
         if self.ticks is not None:
             self.step(round(self.range_plot.getViewBox().mapSceneToView(ev.scenePos()).x()) - self.i)
+
+    def jump_to_id(self):
+        text = self.jump_box.text().strip().lstrip("#").replace(",", "")
+        self.jump_box.clearFocus()
+        if not hasattr(self, "all_sec"):
+            return
+        if not text.isdigit():
+            self.status.setText(f"'{self.jump_box.text()}' is not an update ID")
+        else:
+            target = int(text)
+            last = int(self.all_cum[-1])
+            k = np.searchsorted(self.ids, target) if self.ticks is not None else 0
+            if self.ticks is not None and k < len(self.ids) and self.ids[k] == target:
+                self.pause()
+                self.seek(k)
+                return
+            if 1 <= target <= last:
+                # not loaded yet: load the updates around it, then land on it
+                self.from_box.setText(f"#{max(1, target - 1000)}")
+                self.to_box.setText(f"#{min(last, target + 1000)}")
+                self.update_estimate()
+                self.jump_after_load = target
+                self.load_range()
+                return
+            self.status.setText(f"No update #{target:,} in this file (last is #{last:,})")
+        if self.ticks is not None:
+            self.show_frame(self.i)  # put the current ID back in the box
 
     def mark(self, box):
         if self.ticks is not None:
